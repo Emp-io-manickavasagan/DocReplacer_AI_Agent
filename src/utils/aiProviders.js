@@ -1,213 +1,194 @@
 /**
  * aiProviders.js
- * ─────────────────────────────────────────────────────────────────────────
- * Unified AI provider service for DocForge / DocAgent.
- *
- * Supported providers (free tier):
- *   • Cohere  — command-r-plus-08-2024  (4096 max output tokens)
- *   • Gemini  — gemini-2.0-flash        (generous free quota)
- *
- * Usage:
- *   import { askAI, PROVIDERS } from "./aiProviders";
- *
- *   const result = await askAI({
- *     provider  : "cohere",          // "cohere" | "gemini"
- *     systemMsg : "You are ...",
- *     userMsg   : "Modify this JSON chunk...",
- *   });
- *
- *   if (result.ok) console.log(result.text);
- *   else           console.error(result.error);
- * ─────────────────────────────────────────────────────────────────────────
+ * Gemini + Cohere provider config and API call implementations.
+ * API keys: read from .env (VITE_GEMINI_API_KEY / VITE_COHERE_API_KEY)
+ *           OR passed in directly (fallback for when env is missing)
  */
 
-/* ── Provider registry ─────────────────────────────────────────────────── */
+/* ─── .env keys (requires `vite` restart after editing .env) ─── */
+export const ENV_KEYS = {
+  gemini: import.meta.env.VITE_GEMINI_API_KEY || "",
+  cohere: import.meta.env.VITE_COHERE_API_KEY || "",
+};
 
+/* ─── Provider definitions ─── */
 export const PROVIDERS = {
-  cohere: {
-    id      : "cohere",
-    label   : "Cohere",
-    model   : "command-r-plus-08-2024",
-    maxTokens: 4096,
-    color   : "#8B5CF6",   // violet
-    badge   : "command-r-plus",
-    envKey  : "VITE_COHERE_API_KEY",
-    docsUrl : "https://dashboard.cohere.com/api-keys",
-  },
   gemini: {
-    id      : "gemini",
-    label   : "Gemini",
-    model   : "gemini-2.0-flash",
-    maxTokens: 8192,
-    color   : "#0EA5E9",   // sky blue
-    badge   : "gemini-2.0-flash",
-    envKey  : "VITE_GEMINI_API_KEY",
-    docsUrl : "https://aistudio.google.com/app/apikey",
+    label   : "Google Gemini",
+    icon    : "✦",
+    color   : "#1a73e8",
+    gradient: "linear-gradient(135deg,#1a73e8,#0f4c8a)",
+    models  : [
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro",
+    ],
+    envVar  : "VITE_GEMINI_API_KEY",
+  },
+  cohere: {
+    label   : "Cohere",
+    icon    : "◈",
+    color   : "#39594d",
+    gradient: "linear-gradient(135deg,#39594d,#1a3a30)",
+    models  : [
+      "command-a-03-2025",
+      "command-r-plus",
+      "command-r",
+      "command-r7b-12-2024",
+    ],
+    envVar  : "VITE_COHERE_API_KEY",
   },
 };
 
-/* ── Key helpers ───────────────────────────────────────────────────────── */
-
-/** Returns the API key for a provider from import.meta.env */
-function getKey(providerId) {
-  const keys = {
-    cohere : import.meta.env.VITE_COHERE_API_KEY,
-    gemini : import.meta.env.VITE_GEMINI_API_KEY,
-  };
-  return keys[providerId] || "";
-}
-
-/** Checks whether a key looks valid (non-empty, not placeholder) */
-export function isKeyConfigured(providerId) {
-  const k = getKey(providerId);
-  return !!k && k !== "your_cohere_api_key_here" && k !== "your_gemini_api_key_here";
-}
-
-/* ── System prompt ─────────────────────────────────────────────────────── */
-
-const DEFAULT_SYSTEM = `You are a precise DOCX XML editor assistant.
-You will receive a JSON object representing a Word document paragraph (w:p node).
-Your job:
-  1. Read the "instruction" field and apply ONLY the requested change.
-  2. Modify ONLY _text values — never change _tag or _attrs fields.
-  3. Return ONLY the updated paragraph JSON object.
-  4. Output must be valid JSON — no markdown fences, no explanation text.
-  5. Preserve every _tag, _attrs, and _children structure exactly.
-  6. If no change is needed, return the currentParagraph unchanged.`;
-
-/* ── Cohere call ───────────────────────────────────────────────────────── */
-
-async function callCohere({ userMsg, systemMsg }) {
-  const key = getKey("cohere");
-  if (!key || key === "your_cohere_api_key_here") {
-    return { ok: false, error: "Cohere API key not set. Add VITE_COHERE_API_KEY to your .env file." };
-  }
-
-  const body = {
-    model     : PROVIDERS.cohere.model,
-    max_tokens: PROVIDERS.cohere.maxTokens,
-    messages  : [
-      { role: "user", content: userMsg },
-    ],
-    system    : systemMsg || DEFAULT_SYSTEM,
-  };
-
-  try {
-    const res = await fetch("https://api.cohere.com/v2/chat", {
-      method : "POST",
-      headers: {
-        "Content-Type" : "application/json",
-        "Authorization": `Bearer ${key}`,
-        "X-Client-Name": "docforge",
-      },
-      body: JSON.stringify(body),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      const msg = data?.message || data?.error || `HTTP ${res.status}`;
-      return { ok: false, error: `Cohere error: ${msg}` };
-    }
-
-    // v2 response: data.message.content[0].text
-    const text = data?.message?.content?.[0]?.text
-      || data?.text
-      || "";
-
-    if (!text) return { ok: false, error: "Cohere returned an empty response." };
-    return { ok: true, text: text.trim(), provider: "cohere", model: PROVIDERS.cohere.model };
-
-  } catch (e) {
-    return { ok: false, error: `Cohere fetch failed: ${e.message}` };
-  }
-}
-
-/* ── Gemini call ───────────────────────────────────────────────────────── */
-
-async function callGemini({ userMsg, systemMsg }) {
-  const key = getKey("gemini");
-  if (!key || key === "your_gemini_api_key_here") {
-    return { ok: false, error: "Gemini API key not set. Add VITE_GEMINI_API_KEY to your .env file." };
-  }
-
-  const model   = PROVIDERS.gemini.model;
-  const url     = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-
-  const body = {
-    system_instruction: {
-      parts: [{ text: systemMsg || DEFAULT_SYSTEM }],
+/* ─── Tool schemas ─── */
+export const SEARCH_SCHEMA = {
+  type: "object",
+  properties: {
+    keywords: {
+      type: "array",
+      items: { type: "string" },
+      description: "Keywords or phrases to find in the document paragraphs",
     },
-    contents: [
+  },
+  required: ["keywords"],
+};
+
+export const PATCH_SCHEMA = {
+  type: "object",
+  properties: {
+    patches: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          nodeId      : { type: "string", description: "nodeId from the search result — copy exactly" },
+          paraPath    : { type: "array",  items: {}, description: "paragraphPath from the search result — copy exactly" },
+          newParagraph: { type: "object", description: "Modified paragraph JSON. CRITICAL: keep ALL _tag and _attrs exactly as-is. Only change _text values." },
+        },
+        required: ["nodeId", "paraPath", "newParagraph"],
+      },
+    },
+  },
+  required: ["patches"],
+};
+
+/* ─── System prompt ─── */
+export const SYSTEM_PROMPT =
+`You are a precise DOCX document editor. The user will give you editing instructions.
+
+Workflow:
+1. Call search_paragraphs with ALL relevant keywords in ONE call.
+2. Review the returned paragraph JSON carefully.
+3. Call patch_paragraphs with ALL modifications in ONE call.
+   RULES: Copy nodeId and paragraphPath exactly. Keep every _tag/_attrs exactly as-is. Only change _text values.
+4. Briefly confirm what you changed.
+
+Never ask the user to search manually — use the tools yourself.`;
+
+/* ═══════════════════════════════════════════════════════════
+   GEMINI — generateContent with functionDeclarations
+═══════════════════════════════════════════════════════════ */
+export async function callGemini(model, apiKey, history, systemPrompt = SYSTEM_PROMPT) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const tools = [{
+    functionDeclarations: [
       {
-        role : "user",
-        parts: [{ text: userMsg }],
+        name       : "search_paragraphs",
+        description: "Search the DOCX paragraph index. Call first to find paragraphs to edit. Pass all keywords in one call.",
+        parameters : SEARCH_SCHEMA,
+      },
+      {
+        name       : "patch_paragraphs",
+        description: "Apply edits to document paragraphs. Keep _tag/_attrs exactly as-is, only change _text values.",
+        parameters : PATCH_SCHEMA,
       },
     ],
-    generationConfig: {
-      maxOutputTokens : PROVIDERS.gemini.maxTokens,
-      temperature     : 0.1,   // low temp for deterministic JSON edits
-      responseMimeType: "application/json",
+  }];
+
+  const res = await fetch(url, {
+    method : "POST",
+    headers: { "Content-Type": "application/json" },
+    body   : JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      tools,
+      contents        : history,
+      generationConfig: { maxOutputTokens: 8192, temperature: 0.1 },
+    }),
+  });
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => res.statusText);
+    let msg = t;
+    try { msg = JSON.parse(t)?.error?.message || msg; } catch {}
+    throw new Error(`Gemini ${res.status}: ${msg}`);
+  }
+
+  const data  = await res.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+
+  const toolCalls = parts
+    .filter(p => p.functionCall)
+    .map(p => ({ id: p.functionCall.name + "_" + Date.now(), name: p.functionCall.name, input: p.functionCall.args || {} }));
+
+  const text = parts.filter(p => p.text).map(p => p.text).join("\n").trim();
+
+  return { toolCalls, text, done: toolCalls.length === 0, rawParts: parts };
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COHERE — /v2/chat with OpenAI-style tools
+═══════════════════════════════════════════════════════════ */
+export async function callCohere(model, apiKey, messages) {
+  const tools = [
+    {
+      type    : "function",
+      function: {
+        name       : "search_paragraphs",
+        description: "Search the DOCX paragraph index to find paragraphs to edit.",
+        parameters : SEARCH_SCHEMA,
+      },
     },
-  };
+    {
+      type    : "function",
+      function: {
+        name       : "patch_paragraphs",
+        description: "Apply edits to document paragraphs. Keep _tag/_attrs exactly as-is.",
+        parameters : PATCH_SCHEMA,
+      },
+    },
+  ];
 
-  try {
-    const res  = await fetch(url, {
-      method : "POST",
-      headers: { "Content-Type": "application/json" },
-      body   : JSON.stringify(body),
-    });
+  const res = await fetch("https://api.cohere.com/v2/chat", {
+    method : "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization : `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model, messages, tools, max_tokens: 8192, temperature: 0.1 }),
+  });
 
-    const data = await res.json();
-
-    if (!res.ok) {
-      const msg = data?.error?.message || `HTTP ${res.status}`;
-      return { ok: false, error: `Gemini error: ${msg}` };
-    }
-
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    if (!text) return { ok: false, error: "Gemini returned an empty response." };
-
-    return { ok: true, text: text.trim(), provider: "gemini", model };
-
-  } catch (e) {
-    return { ok: false, error: `Gemini fetch failed: ${e.message}` };
-  }
-}
-
-/* ── Main unified call ─────────────────────────────────────────────────── */
-
-/**
- * Calls the selected AI provider and returns { ok, text, provider, model }
- * or { ok: false, error }.
- *
- * @param {object} opts
- * @param {"cohere"|"gemini"} opts.provider
- * @param {string} opts.userMsg     — the full user message / JSON chunk
- * @param {string} [opts.systemMsg] — optional system override
- */
-export async function askAI({ provider, userMsg, systemMsg }) {
-  if (!provider || !PROVIDERS[provider]) {
-    return { ok: false, error: `Unknown provider: "${provider}". Use "cohere" or "gemini".` };
-  }
-  if (!userMsg?.trim()) {
-    return { ok: false, error: "userMsg is empty." };
+  if (!res.ok) {
+    const t = await res.text().catch(() => res.statusText);
+    let msg = t;
+    try { msg = JSON.parse(t)?.message || msg; } catch {}
+    throw new Error(`Cohere ${res.status}: ${msg}`);
   }
 
-  switch (provider) {
-    case "cohere": return callCohere({ userMsg, systemMsg });
-    case "gemini": return callGemini({ userMsg, systemMsg });
-    default:       return { ok: false, error: `Provider "${provider}" not implemented.` };
-  }
-}
+  const data    = await res.json();
+  const content = Array.isArray(data.message?.content) ? data.message.content : [];
 
-/**
- * Strips markdown code fences if the model wrapped its response in them.
- * Safe to call even if the text is already clean JSON.
- */
-export function stripFences(text) {
-  return text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
+  const toolCalls = content
+    .filter(b => b.type === "tool_call")
+    .map(b => ({
+      id   : b.id || b.tool_call?.id || (b.tool_call?.function?.name + "_" + Date.now()),
+      name : b.tool_call?.function?.name || "",
+      input: (() => { try { return JSON.parse(b.tool_call?.function?.arguments || "{}"); } catch { return {}; } })(),
+    }));
+
+  const text = content.filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+  const done = data.finish_reason !== "TOOL_CALL" && toolCalls.length === 0;
+
+  return { toolCalls, text, done, rawMsg: data.message };
 }
